@@ -3416,21 +3416,51 @@ def _is_declared_reasoning_effort_key(key: str) -> bool:
     return True
 
 
+def _consumer_reasoning_efforts(key: str) -> Optional[Tuple[str, ...]]:
+    """Levels *key*'s consumer accepts, when that is narrower than the generic ladder.
+
+    ``tools/x_search_tool.py`` raises on anything outside ``X_SEARCH_REASONING_EFFORTS`` (the
+    disable aliases included), so validating that leaf against the generic ladder would still
+    let ``hermes config set`` save a value the tool refuses at call time. Taken from the consumer
+    module rather than copied here, so the enum keeps exactly one owner; imported lazily because
+    that module registers its tool at import time.
+    """
+    if _split_key_path(key)[0] != "x_search":
+        return None
+    try:
+        from tools.x_search_tool import X_SEARCH_REASONING_EFFORTS
+    except Exception:
+        # A broken or absent tool module cannot consume the value at all, so degrade to the
+        # generic ladder rather than aborting the write (guarded-import convention of this file).
+        return None
+    return X_SEARCH_REASONING_EFFORTS
+
+
 def _reject_unrecognized_reasoning_effort(key: str, value: Any) -> None:
     """Refuse a reasoning-effort value the runtime would silently discard.
 
     ``parse_reasoning_effort()`` returns ``None`` for an unrecognized level, and every caller
     then falls back to the default (medium) with a log warning at most — so a typo saved here
     leaves the user believing the setting took effect. Key validation already covers the dotted
-    path; this covers the value of the schema-declared leaves only.
-    ``set_config_value(..., force=True)`` bypasses this, matching how ``--force`` already
-    bypasses the unknown-key notice.
+    path; this covers the value of the schema-declared leaves only, each against what its own
+    consumer accepts. ``set_config_value(..., force=True)`` bypasses this, matching how
+    ``--force`` already bypasses the unknown-key notice.
     """
     if not _is_declared_reasoning_effort_key(key):
         return
     # The "unset" sentinel is per-leaf: ``""`` for the string-defaulted leaves (agent,
     # delegation, auxiliary.*) and ``None`` for the null-defaulted one (x_search).
     if value is None or (isinstance(value, str) and not value.strip()):
+        return
+
+    consumer_efforts = _consumer_reasoning_efforts(key)
+    if consumer_efforts is not None:
+        if str(value).strip().lower() not in consumer_efforts:
+            _exit_invalid(
+                f"✗ Invalid {key} value {value!r} — its consumer accepts only "
+                f"{', '.join(consumer_efforts)} and raises on anything else.\n"
+                f"  Set it empty to unset. Use --force to save it anyway."
+            )
         return
 
     from hermes_constants import VALID_REASONING_EFFORTS, parse_reasoning_effort
